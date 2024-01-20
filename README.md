@@ -36,76 +36,87 @@ func main() {
 }
 
 ````
-## 另外一个纯go的模拟键盘发送事件的demo参考
->- 每隔五秒自动按ctrl+c键然后打印出剪切板内容
+## 结合另一个纯go的模拟键盘发送事件的demo参考
+>- 实现监听键盘当按下ALT+Z的快捷键时候，自动发送一个Ctrl+C的组合键复制选中文本并打印剪贴板
 
 ```go
-
-//go:build windows
-// +build windows
 
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/micmonay/keybd_event"
+	gowinkey "github.com/pizixi/KeyBoardListen"
+	"golang.org/x/net/context"
 )
 
 func main() {
-	log.SetFlags(0)
-	log.SetPrefix("error: ")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if err := run(); err != nil {
-		log.Fatal(err)
+	go listenKeyboard(ctx)
+	if err := run(ctx); err != nil {
+		log.Printf("ERROR: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func run() error {
-	// 设置Ctrl+C的keybd_event
-	kb, err := keybd_event.NewKeyBonding()
-	if err != nil {
-		return err
-	}
-
-	// 可能需要根据系统更改key event
-	kb.SetKeys(keybd_event.VK_C)
-	kb.HasCTRL(true)
-
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-
-	fmt.Println("start capturing keyboard input")
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
+func listenKeyboard(ctx context.Context) {
+	events := gowinkey.Listen()
 	for {
 		select {
-		case <-ticker.C:
-			// 模拟Ctrl+C（复制）键的按下
-			if err := kb.Launching(); err != nil {
-				log.Printf("Error simulating key press: %v\n", err)
-				continue
+		case <-ctx.Done():
+			return
+		case e := <-events:
+			if e.State != 0 && e.PressedKeys.ContainsAll(gowinkey.VK_LMENU, gowinkey.VK_Z) {
+				log.Println("INFO: Shortcut Alt+Z triggered")
+				triggerCopy()
 			}
-			// 等待一段时间以确保剪贴板已更新
-			time.Sleep(100 * time.Millisecond)
-			text, err := clipboard.ReadAll()
-			if err != nil {
-				log.Printf("Error reading from clipboard: %v\n", err)
-				continue
-			}
-			fmt.Printf("Clipboard content: %s\n", text)
-		case <-signalChan:
-			fmt.Println("Received shutdown signal")
-			return nil
 		}
 	}
 }
+
+func triggerCopy() {
+	kb, err := keybd_event.NewKeyBonding()
+	if err != nil {
+		log.Printf("ERROR: Creating new key bonding: %v\n", err)
+		return
+	}
+
+	kb.SetKeys(keybd_event.VK_C)
+	kb.HasCTRL(true)
+
+	time.Sleep(1 * time.Second) // Wait 1 second before copying
+	log.Println("INFO: Attempting to copy")
+	if err := kb.Launching(); err != nil {
+		log.Printf("ERROR: Simulating key press: %v\n", err)
+		return
+	}
+
+	time.Sleep(100 * time.Millisecond) // Ensure clipboard has updated
+	text, err := clipboard.ReadAll()
+	if err != nil {
+		log.Printf("ERROR: Reading from clipboard: %v\n", err)
+		return
+	}
+	log.Printf("INFO: Clipboard content: %s\n", text)
+}
+
+func run(ctx context.Context) error {
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+
+	log.Println("INFO: Start capturing keyboard input")
+	<-signalChan
+	log.Println("INFO: Received shutdown signal")
+	return nil
+}
+
 
 ```
